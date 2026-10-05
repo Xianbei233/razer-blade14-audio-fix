@@ -1,0 +1,11 @@
+[Unit]
+Description=Enable Razer Blade 14 ALC897 headphone amplifier GPIOs
+After=sound.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/libexec/razer-alc897-gpio
+TimeoutStartSec=15s
+NoNewPrivileges=yes

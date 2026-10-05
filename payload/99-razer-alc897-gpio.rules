@@ -1,0 +1,2 @@
+# The helper dynamically matches the exact ALC897 subsystem; D0 is HDA codec address 0.
+ACTION=="add", SUBSYSTEM=="sound", KERNEL=="hwC*D0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="razer-alc897-gpio.service"

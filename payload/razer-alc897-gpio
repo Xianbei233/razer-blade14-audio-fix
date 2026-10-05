@@ -1,0 +1,79 @@
+#!/bin/bash
+set -euo pipefail
+
+vendor=0x10ec0897
+subsystem=0x1a582014
+nid=0x01
+hda=/usr/bin/hda-verb
+log() { printf 'razer-alc897-gpio: %s\n' "$*" >&2; }
+
+[[ -x "$hda" ]] || { log "missing $hda"; exit 1; }
+shopt -s nullglob
+matches=()
+for codec in /proc/asound/card[0-9]*/codec#*; do
+  [[ -r "$codec" ]] || continue
+  grep -Eiq "^[[:space:]]*Vendor Id:[[:space:]]*${vendor}$" "$codec" || continue
+  grep -Eiq "^[[:space:]]*Subsystem Id:[[:space:]]*${subsystem}$" "$codec" || continue
+  if [[ "$codec" =~ ^/proc/asound/card([0-9]+)/codec#([0-9]+)$ ]]; then
+    matches+=("${BASH_REMATCH[1]}:${BASH_REMATCH[2]}:$codec")
+  fi
+done
+if ((${#matches[@]} == 0)); then log 'target ALC897 not present; no action'; exit 0; fi
+if ((${#matches[@]} != 1)); then log "found ${#matches[@]} matching codecs; refusing ambiguous write"; exit 1; fi
+IFS=: read -r card addr codecfile <<<"${matches[0]}"
+hwdep="/dev/snd/hwC${card}D${addr}"
+[[ -c "$hwdep" ]] || { log "matching $codecfile but $hwdep is not a character device"; exit 1; }
+log "matched $codecfile (card $card, codec address $addr) -> $hwdep"
+
+getval() {
+  local verb=$1 out
+  out=$("$hda" "$hwdep" "$nid" "$verb" 0 2>&1) || { log "GET $verb failed: $out"; return 1; }
+  if [[ "$out" =~ value[[:space:]]*=[[:space:]]*0[xX]([[:xdigit:]]+) ]]; then
+    printf '%d' "0x${BASH_REMATCH[1]}"
+  else
+    log "could not parse GET $verb response: $out"
+    return 1
+  fi
+}
+setval() {
+  local verb=$1 value=$2 out
+  out=$("$hda" "$hwdep" "$nid" "$verb" "$(printf '0x%x' "$value")" 2>&1) || {
+    log "SET $verb value $(printf '0x%x' "$value") failed: $out"; return 1;
+  }
+}
+restore_snapshot() {
+  local failed=0 got
+  # Restore output data before direction and mask, reversing the patch's enable sequence.
+  setval 0x715 "$old_data" || failed=1
+  setval 0x717 "$old_direction" || failed=1
+  setval 0x716 "$old_mask" || failed=1
+  got=$(getval 0xf16) || failed=1; [[ ${got:-x} == "$old_mask" ]] || failed=1
+  got=$(getval 0xf17) || failed=1; [[ ${got:-x} == "$old_direction" ]] || failed=1
+  got=$(getval 0xf15) || failed=1; [[ ${got:-x} == "$old_data" ]] || failed=1
+  if ((failed)); then log 'ERROR: rollback could not be verified; manual register inspection required'; return 1; fi
+  log 'restored original GPIO mask/direction/data and verified readback'
+}
+
+old_mask=$(getval 0xf16)
+old_direction=$(getval 0xf17)
+old_data=$(getval 0xf15)
+log "GPIO before: mask=$(printf '0x%x' "$old_mask") direction=$(printf '0x%x' "$old_direction") data=$(printf '0x%x' "$old_data")"
+if ((old_mask == 7 && old_direction == 7 && old_data == 7)); then
+  log 'GPIO amp state already equals 0x7/0x7/0x7; idempotent no-op'
+else
+  # Exact three verbs and order from the matched RZ09-0370/ALC897 patch.
+  if ! setval 0x716 7 || ! setval 0x717 7 || ! setval 0x715 7; then
+    restore_snapshot || true
+    exit 1
+  fi
+fi
+
+new_mask=$(getval 0xf16)
+new_direction=$(getval 0xf17)
+new_data=$(getval 0xf15)
+log "GPIO after: mask=$(printf '0x%x' "$new_mask") direction=$(printf '0x%x' "$new_direction") data=$(printf '0x%x' "$new_data")"
+if ((new_mask != 7 || new_direction != 7 || new_data != 7)); then
+  log 'GPIO target readback mismatch; restoring snapshot'
+  restore_snapshot || true
+  exit 1
+fi

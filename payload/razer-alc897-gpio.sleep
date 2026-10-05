@@ -1,0 +1,10 @@
+#!/bin/bash
+# systemd-sleep passes pre/post and the sleep mode. Reapply only after resume.
+[[ "${1:-}" == post ]] || exit 0
+if /usr/local/libexec/razer-alc897-gpio; then
+  exit 0
+else
+  rc=$?
+  /usr/bin/logger -t razer-alc897-gpio "resume reapply failed (status $rc)"
+  exit "$rc"
+fi
